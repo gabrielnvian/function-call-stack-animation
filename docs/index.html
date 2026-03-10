@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>x86 Call Stack Visualizer</title>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0f1117; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState } = React;
+
+    const STEPS = [
+      {
+        title: "Initial State",
+        subtitle: "main() is running",
+        description: "main() is executing. EBP points to the top of main's frame, ESP points to the bottom. EIP points to the current instruction in main — the function call.",
+        eip: "main code",
+        stack: [
+          { label: "main's local vars", color: "#3b82f6", dim: false },
+          { label: "← EBP (top of main's frame)", color: "#3b82f6", dim: false, marker: true },
+          { label: "← ESP (bottom of main's frame)", color: "#3b82f6", dim: false, marker: true },
+        ],
+        registers: { EIP: "main: call foo()", EBP: "0x1010", ESP: "0x1010" },
+        highlight: [],
+      },
+      {
+        title: "Step 1: Push Arguments",
+        subtitle: "Caller (main) pushes args",
+        description: "Before calling foo(), main pushes the function arguments onto the stack. ESP moves DOWN to accommodate them. First arg ends up at the highest address, last arg at the lowest.",
+        stack: [
+          { label: "main's local vars", color: "#3b82f6", dim: true },
+          { label: "← EBP", color: "#3b82f6", dim: true, marker: true },
+          { label: "arg 2", color: "#f59e0b", dim: false, new: true },
+          { label: "arg 1", color: "#f59e0b", dim: false, new: true },
+          { label: "← ESP", color: "#f59e0b", dim: false, marker: true },
+        ],
+        registers: { EIP: "main: call foo()", EBP: "0x1010", ESP: "0x1008" },
+        highlight: ["ESP"],
+      },
+      {
+        title: "Step 2: Push Return Address (RIP)",
+        subtitle: "Save where to return to",
+        description: "main needs to remember where to resume execution after foo() finishes. It pushes the address of the next instruction in main onto the stack — this is called the RIP (Return Instruction Pointer). ESP moves down again.",
+        stack: [
+          { label: "main's local vars", color: "#3b82f6", dim: true },
+          { label: "← EBP", color: "#3b82f6", dim: true, marker: true },
+          { label: "arg 2", color: "#f59e0b", dim: true },
+          { label: "arg 1", color: "#f59e0b", dim: true },
+          { label: "RIP (return addr to main)", color: "#ef4444", dim: false, new: true },
+          { label: "← ESP", color: "#ef4444", dim: false, marker: true },
+        ],
+        registers: { EIP: "main: call foo()", EBP: "0x1010", ESP: "0x1004" },
+        highlight: ["ESP"],
+      },
+      {
+        title: "Step 3: Update EIP",
+        subtitle: "Jump into foo()",
+        description: "EIP is updated to point to the first instruction of foo(). The CPU now starts executing foo's code. We're inside foo() now.",
+        stack: [
+          { label: "main's local vars", color: "#3b82f6", dim: true },
+          { label: "← EBP", color: "#3b82f6", dim: true, marker: true },
+          { label: "arg 2", color: "#f59e0b", dim: true },
+          { label: "arg 1", color: "#f59e0b", dim: true },
+          { label: "RIP (return addr to main)", color: "#ef4444", dim: true },
+          { label: "← ESP", color: "#ef4444", dim: true, marker: true },
+        ],
+        registers: { EIP: "foo: first instruction", EBP: "0x1010", ESP: "0x1004" },
+        highlight: ["EIP"],
+      },
+      {
+        title: "Step 4: Push Old EBP (SFP)",
+        subtitle: "foo's prologue begins",
+        description: "foo() needs EBP for its own frame. But first it saves main's EBP onto the stack — this is the SFP (Saved Frame Pointer). Now we can safely overwrite EBP. ESP moves down.",
+        stack: [
+          { label: "main's local vars", color: "#3b82f6", dim: true },
+          { label: "← EBP (still pointing here!)", color: "#3b82f6", dim: true, marker: true },
+          { label: "arg 2", color: "#f59e0b", dim: true },
+          { label: "arg 1", color: "#f59e0b", dim: true },
+          { label: "RIP (return addr to main)", color: "#ef4444", dim: true },
+          { label: "SFP (saved EBP of main)", color: "#8b5cf6", dim: false, new: true },
+          { label: "← ESP", color: "#8b5cf6", dim: false, marker: true },
+        ],
+        registers: { EIP: "foo: prologue", EBP: "0x1010", ESP: "0x1000" },
+        highlight: ["ESP"],
+      },
+      {
+        title: "Step 5: Move EBP Down",
+        subtitle: "Establish foo's frame anchor",
+        description: "EBP is set to where ESP currently is — the top of foo's new frame. EBP is now foo's anchor point. All of foo's local variables will be at negative offsets from here (EBP-4, EBP-8...), and the arguments are at positive offsets above (EBP+8, EBP+12...).",
+        stack: [
+          { label: "main's local vars", color: "#3b82f6", dim: true },
+          { label: "arg 2", color: "#f59e0b", dim: true },
+          { label: "arg 1", color: "#f59e0b", dim: true },
+          { label: "RIP (return addr to main)", color: "#ef4444", dim: true },
+          { label: "SFP (saved EBP of main)", color: "#8b5cf6", dim: false },
+          { label: "← EBP = ESP (top of foo's frame)", color: "#10b981", dim: false, marker: true },
+        ],
+        registers: { EIP: "foo: prologue", EBP: "0x1000", ESP: "0x1000" },
+        highlight: ["EBP"],
+      },
+      {
+        title: "Step 6: Move ESP Down (Allocate Locals)",
+        subtitle: "Make room for local variables",
+        description: "The compiler knows exactly how many bytes foo's local variables need. It emits a single 'sub esp, N' instruction to carve out that space. The area between EBP and ESP is now foo's local variable space.",
+        stack: [
+          { label: "main's local vars", color: "#3b82f6", dim: true },
+          { label: "arg 2", color: "#f59e0b", dim: true },
+          { label: "arg 1", color: "#f59e0b", dim: true },
+          { label: "RIP (return addr to main)", color: "#ef4444", dim: true },
+          { label: "SFP (saved EBP of main)", color: "#8b5cf6", dim: false },
+          { label: "← EBP", color: "#10b981", dim: false, marker: true },
+          { label: "foo local var (EBP-4)", color: "#10b981", dim: false, new: true },
+          { label: "foo local var (EBP-8)", color: "#10b981", dim: false, new: true },
+          { label: "← ESP", color: "#10b981", dim: false, marker: true },
+        ],
+        registers: { EIP: "foo: executing", EBP: "0x1000", ESP: "0x0FF8" },
+        highlight: ["ESP"],
+      },
+      {
+        title: "Step 7: Execution",
+        subtitle: "foo() runs normally",
+        description: "foo() runs its code. Local variables are accessed via EBP offsets (EBP-4, EBP-8). Arguments are accessed above EBP (EBP+8, EBP+12). EBP stays fixed the whole time — it's the stable reference point for this entire frame.",
+        stack: [
+          { label: "main's local vars", color: "#3b82f6", dim: true },
+          { label: "arg 2  [EBP+12] ✓", color: "#f59e0b", dim: false },
+          { label: "arg 1  [EBP+8] ✓", color: "#f59e0b", dim: false },
+          { label: "RIP (return addr to main)", color: "#ef4444", dim: true },
+          { label: "SFP (saved EBP of main)", color: "#8b5cf6", dim: true },
+          { label: "← EBP (anchor)", color: "#10b981", dim: false, marker: true },
+          { label: "foo local var [EBP-4] ✓", color: "#10b981", dim: false },
+          { label: "foo local var [EBP-8] ✓", color: "#10b981", dim: false },
+          { label: "← ESP", color: "#10b981", dim: false, marker: true },
+        ],
+        registers: { EIP: "foo: executing", EBP: "0x1000", ESP: "0x0FF8" },
+        highlight: [],
+      },
+      {
+        title: "Step 8: Move ESP Up (Epilogue)",
+        subtitle: "Tear down foo's locals",
+        description: "foo() is done. ESP is moved back up to EBP, which 'frees' the local variable space. The data is still there in memory but is now considered undefined — it will be overwritten by future stack operations.",
+        stack: [
+          { label: "main's local vars", color: "#3b82f6", dim: true },
+          { label: "arg 2", color: "#f59e0b", dim: true },
+          { label: "arg 1", color: "#f59e0b", dim: true },
+          { label: "RIP (return addr to main)", color: "#ef4444", dim: true },
+          { label: "SFP (saved EBP of main)", color: "#8b5cf6", dim: false },
+          { label: "← EBP = ESP", color: "#10b981", dim: false, marker: true },
+          { label: "foo local var [undefined]", color: "#6b7280", dim: true },
+          { label: "foo local var [undefined]", color: "#6b7280", dim: true },
+        ],
+        registers: { EIP: "foo: epilogue", EBP: "0x1000", ESP: "0x1000" },
+        highlight: ["ESP"],
+      },
+      {
+        title: "Step 9: Pop SFP → Restore EBP",
+        subtitle: "Restore main's frame anchor",
+        description: "The SFP (saved frame pointer) is popped off the stack and loaded back into EBP. EBP now points back to the top of main's frame — exactly where it was before foo() was called. ESP moves up by one word.",
+        stack: [
+          { label: "main's local vars", color: "#3b82f6", dim: false },
+          { label: "← EBP (restored!)", color: "#3b82f6", dim: false, marker: true },
+          { label: "arg 2", color: "#f59e0b", dim: true },
+          { label: "arg 1", color: "#f59e0b", dim: true },
+          { label: "RIP (return addr to main)", color: "#ef4444", dim: false },
+          { label: "← ESP", color: "#ef4444", dim: false, marker: true },
+          { label: "[undefined]", color: "#6b7280", dim: true },
+          { label: "[undefined]", color: "#6b7280", dim: true },
+        ],
+        registers: { EIP: "foo: epilogue", EBP: "0x1010", ESP: "0x1004" },
+        highlight: ["EBP"],
+      },
+      {
+        title: "Step 10: Pop RIP → Restore EIP",
+        subtitle: "Jump back to main",
+        description: "The RIP (return instruction pointer) is popped off the stack and loaded into EIP. The CPU now resumes executing main exactly where it left off — the instruction right after the call to foo().",
+        stack: [
+          { label: "main's local vars", color: "#3b82f6", dim: false },
+          { label: "← EBP", color: "#3b82f6", dim: false, marker: true },
+          { label: "arg 2", color: "#f59e0b", dim: true },
+          { label: "arg 1", color: "#f59e0b", dim: true },
+          { label: "← ESP", color: "#f59e0b", dim: false, marker: true },
+          { label: "[undefined]", color: "#6b7280", dim: true },
+          { label: "[undefined]", color: "#6b7280", dim: true },
+        ],
+        registers: { EIP: "main: next instruction ✓", EBP: "0x1010", ESP: "0x1008" },
+        highlight: ["EIP"],
+      },
+      {
+        title: "Step 11: Clean Up Arguments",
+        subtitle: "main removes args from stack",
+        description: "main increments ESP past the arguments it pushed before the call. Everything is back to exactly how it was before foo() was ever called. The stack is fully restored.",
+        stack: [
+          { label: "main's local vars", color: "#3b82f6", dim: false },
+          { label: "← EBP", color: "#3b82f6", dim: false, marker: true },
+          { label: "← ESP  (back to start!)", color: "#3b82f6", dim: false, marker: true },
+          { label: "[undefined]", color: "#6b7280", dim: true },
+          { label: "[undefined]", color: "#6b7280", dim: true },
+          { label: "[undefined]", color: "#6b7280", dim: true },
+          { label: "[undefined]", color: "#6b7280", dim: true },
+        ],
+        registers: { EIP: "main: continuing...", EBP: "0x1010", ESP: "0x1010" },
+        highlight: ["ESP"],
+      },
+    ];
+
+    const PHASE_MAP = [
+      { label: "Initial", steps: [0], color: "#3b82f6" },
+      { label: "Caller Setup", steps: [1, 2, 3], color: "#f59e0b" },
+      { label: "Prologue", steps: [4, 5, 6], color: "#8b5cf6" },
+      { label: "Execution", steps: [7], color: "#10b981" },
+      { label: "Epilogue", steps: [8, 9, 10], color: "#ef4444" },
+      { label: "Cleanup", steps: [11], color: "#6366f1" },
+    ];
+
+    function App() {
+      const [step, setStep] = useState(0);
+      const current = STEPS[step];
+
+      const getPhase = (s) => PHASE_MAP.find(p => p.steps.includes(s));
+      const phase = getPhase(step);
+
+      const regColor = (reg) => current.highlight.includes(reg) ? "#fbbf24" : "#e2e8f0";
+
+      return (
+        <div style={{
+          fontFamily: "'JetBrains Mono', 'Fira Code', 'Courier New', monospace",
+          background: "#0f1117",
+          minHeight: "100vh",
+          padding: "24px 16px",
+          color: "#e2e8f0",
+        }}>
+          <div style={{ maxWidth: 820, margin: "0 auto" }}>
+
+            {/* Header */}
+            <div style={{ textAlign: "center", marginBottom: 24 }}>
+              <div style={{ fontSize: 11, letterSpacing: 4, color: "#64748b", marginBottom: 6, textTransform: "uppercase" }}>x86 Call Stack Visualizer</div>
+              <h1 style={{ fontSize: 22, fontWeight: 700, color: "#f1f5f9", margin: 0 }}>
+                Function Call: <span style={{ color: "#60a5fa" }}>main()</span> → <span style={{ color: "#34d399" }}>foo()</span>
+              </h1>
+            </div>
+
+            {/* Phase bar */}
+            <div style={{ display: "flex", gap: 4, marginBottom: 20, borderRadius: 8, overflow: "hidden" }}>
+              {PHASE_MAP.map((p) => (
+                <div
+                  key={p.label}
+                  onClick={() => setStep(p.steps[0])}
+                  style={{
+                    flex: 1,
+                    padding: "6px 4px",
+                    background: getPhase(step)?.label === p.label ? p.color : "#1e293b",
+                    color: getPhase(step)?.label === p.label ? "#000" : "#64748b",
+                    fontSize: 10,
+                    textAlign: "center",
+                    fontWeight: 700,
+                    letterSpacing: 1,
+                    textTransform: "uppercase",
+                    cursor: "pointer",
+                    transition: "all 0.2s",
+                  }}
+                >
+                  {p.label}
+                </div>
+              ))}
+            </div>
+
+            {/* Step indicator */}
+            <div style={{ display: "flex", gap: 6, marginBottom: 20, justifyContent: "center", flexWrap: "wrap" }}>
+              {STEPS.map((_, i) => (
+                <button
+                  key={i}
+                  onClick={() => setStep(i)}
+                  style={{
+                    width: 32, height: 32,
+                    borderRadius: "50%",
+                    border: i === step ? `2px solid ${phase?.color}` : "2px solid #334155",
+                    background: i === step ? phase?.color : i < step ? "#1e293b" : "#0f1117",
+                    color: i === step ? "#000" : i < step ? "#64748b" : "#334155",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    transition: "all 0.15s",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  {i}
+                </button>
+              ))}
+            </div>
+
+            {/* Main content */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
+
+              {/* Stack */}
+              <div style={{ background: "#1e293b", borderRadius: 12, padding: 16, border: "1px solid #334155" }}>
+                <div style={{ fontSize: 10, letterSpacing: 3, color: "#64748b", marginBottom: 12, textTransform: "uppercase" }}>
+                  Stack Memory
+                </div>
+                <div style={{ fontSize: 10, color: "#475569", marginBottom: 8, display: "flex", justifyContent: "space-between" }}>
+                  <span>↑ Higher addresses</span>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {current.stack.map((item, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "7px 10px",
+                        borderRadius: 6,
+                        background: item.marker ? "transparent" : item.dim ? "#0f1117" : `${item.color}18`,
+                        border: item.marker ? "none" : item.new ? `1px solid ${item.color}` : `1px solid ${item.dim ? "#1e293b" : item.color}44`,
+                        opacity: item.dim ? 0.4 : 1,
+                        transition: "all 0.3s",
+                      }}
+                    >
+                      {item.new && (
+                        <span style={{
+                          fontSize: 9,
+                          background: item.color,
+                          color: "#000",
+                          borderRadius: 3,
+                          padding: "1px 4px",
+                          fontWeight: 700,
+                          flexShrink: 0,
+                        }}>NEW</span>
+                      )}
+                      <span style={{
+                        fontSize: 11,
+                        color: item.marker ? item.color : item.dim ? "#475569" : "#e2e8f0",
+                        fontWeight: item.marker ? 700 : 400,
+                      }}>
+                        {item.label}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize: 10, color: "#475569", marginTop: 8 }}>
+                  <span>↓ Lower addresses (stack grows down)</span>
+                </div>
+              </div>
+
+              {/* Right side: registers + description */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+
+                {/* Registers */}
+                <div style={{ background: "#1e293b", borderRadius: 12, padding: 16, border: "1px solid #334155" }}>
+                  <div style={{ fontSize: 10, letterSpacing: 3, color: "#64748b", marginBottom: 12, textTransform: "uppercase" }}>
+                    CPU Registers
+                  </div>
+                  {Object.entries(current.registers).map(([reg, val]) => (
+                    <div key={reg} style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      marginBottom: 8,
+                      padding: "8px 10px",
+                      borderRadius: 6,
+                      background: current.highlight.includes(reg) ? "#fbbf2418" : "#0f1117",
+                      border: `1px solid ${current.highlight.includes(reg) ? "#fbbf24" : "#334155"}`,
+                      transition: "all 0.3s",
+                    }}>
+                      <span style={{
+                        fontSize: 12,
+                        fontWeight: 700,
+                        color: regColor(reg),
+                        minWidth: 36,
+                      }}>{reg}</span>
+                      <span style={{ fontSize: 11, color: "#94a3b8" }}>→</span>
+                      <span style={{ fontSize: 11, color: current.highlight.includes(reg) ? "#fbbf24" : "#94a3b8" }}>{val}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Description */}
+                <div style={{
+                  background: "#1e293b",
+                  borderRadius: 12,
+                  padding: 16,
+                  border: `1px solid ${phase?.color}44`,
+                  flex: 1,
+                }}>
+                  <div style={{ fontSize: 10, letterSpacing: 3, color: phase?.color, marginBottom: 8, textTransform: "uppercase", fontWeight: 700 }}>
+                    Step {step}: {current.title}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#94a3b8", lineHeight: 1.7 }}>
+                    {current.description}
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+            {/* Navigation */}
+            <div style={{ display: "flex", gap: 12, justifyContent: "center", alignItems: "center" }}>
+              <button
+                onClick={() => setStep(s => Math.max(0, s - 1))}
+                disabled={step === 0}
+                style={{
+                  padding: "10px 24px",
+                  borderRadius: 8,
+                  border: "1px solid #334155",
+                  background: step === 0 ? "#0f1117" : "#1e293b",
+                  color: step === 0 ? "#334155" : "#e2e8f0",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: step === 0 ? "not-allowed" : "pointer",
+                  fontFamily: "inherit",
+                }}
+              >← Prev</button>
+              <span style={{ fontSize: 12, color: "#475569" }}>{step + 1} / {STEPS.length}</span>
+              <button
+                onClick={() => setStep(s => Math.min(STEPS.length - 1, s + 1))}
+                disabled={step === STEPS.length - 1}
+                style={{
+                  padding: "10px 24px",
+                  borderRadius: 8,
+                  border: "1px solid #334155",
+                  background: step === STEPS.length - 1 ? "#0f1117" : "#1e293b",
+                  color: step === STEPS.length - 1 ? "#334155" : "#e2e8f0",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: step === STEPS.length - 1 ? "not-allowed" : "pointer",
+                  fontFamily: "inherit",
+                }}
+              >Next →</button>
+            </div>
+
+            {/* Legend */}
+            <div style={{ marginTop: 16, display: "flex", gap: 16, justifyContent: "center", flexWrap: "wrap" }}>
+              {[["#3b82f6","main's data"],["#f59e0b","arguments"],["#ef4444","RIP"],["#8b5cf6","SFP"],["#10b981","foo's locals"],["#fbbf24","changed this step"]].map(([c,l]) => (
+                <div key={l} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#64748b" }}>
+                  <div style={{ width: 10, height: 10, borderRadius: 2, background: c }} />
+                  {l}
+                </div>
+              ))}
+            </div>
+
+          </div>
+        </div>
+      );
+    }
+
+    const container = document.getElementById('root');
+    const root = ReactDOM.createRoot(container);
+    root.render(<React.StrictMode><App /></React.StrictMode>);
+  </script>
+</body>
+</html>
